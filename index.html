@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Giám sát radar LD2451</title>
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.3.4/dist/mqtt.min.js"></script>
+<style>
+  :root{--bg:#0d1117;--card:#161b22;--line:#2a3340;--txt:#e6edf3;--mut:#8b949e;--near:#ff5d5d;--far:#4cd964;--warn:#f0a030}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font-family:system-ui,Arial,sans-serif}
+  .wrap{max-width:1000px;margin:0 auto;padding:12px}
+  header{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin:4px 0 12px}
+  h1{font-size:18px;margin:0}
+  .tools{display:flex;gap:8px;align-items:center}
+  select{background:var(--card);color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:4px 8px}
+  .badge{font-size:12px;padding:3px 9px;border-radius:12px;background:#333;color:#ddd;white-space:nowrap}
+  .badge.ok{background:#12391f;color:var(--far)}
+  .badge.off{background:#401818;color:var(--near)}
+  .badge.warn{background:#40300f;color:var(--warn)}
+  .zones{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px}
+  .zone{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px}
+  .zh{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:16px}
+  .radar{background:#05080c;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  canvas{display:block;width:100%}
+  .list{margin-top:8px;font-size:13px;min-height:20px}
+  .t{display:flex;align-items:center;padding:4px 0;border-bottom:1px solid var(--line)}
+  .t:last-child{border-bottom:0}
+  .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:8px;flex:none}
+  .none{color:var(--mut)}
+  .meta{margin-top:6px;font-size:11px;color:var(--mut)}
+  .legend{display:flex;gap:14px;font-size:12px;color:var(--mut);margin:12px 0}
+  .log{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px;font-size:13px}
+  .log h2{font-size:14px;margin:0 0 6px}
+  #log{max-height:180px;overflow:auto}
+  #log div{padding:3px 0;border-bottom:1px solid var(--line);color:var(--mut)}
+  #log div:last-child{border-bottom:0}
+  #log b{color:var(--txt)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Giám sát radar HLK-LD2451</h1>
+    <div class="tools">
+      <span class="badge" id="mq">MQTT: đang kết nối...</span>
+      <span class="badge" id="gw">Gateway: ?</span>
+      <select id="range">
+        <option value="20">20 m</option>
+        <option value="50">50 m</option>
+        <option value="100" selected>100 m</option>
+      </select>
+    </div>
+  </header>
+
+  <div id="zones" class="zones"></div>
+
+  <div class="legend">
+    <span><i class="dot" style="background:var(--near)"></i>Lại gần</span>
+    <span><i class="dot" style="background:var(--far)"></i>Ra xa</span>
+  </div>
+
+  <div class="log">
+    <h2>Nhật ký phát hiện</h2>
+    <div id="log"><div>Chưa có sự kiện.</div></div>
+  </div>
+</div>
+
+<script>
+// ---------- Cau hinh ----------
+const BROKER_URL = 'wss://broker.emqx.io:8084/mqtt';   // WebSocket bao mat cua broker
+const PREFIX     = 'vimar_vtd_ld2451';                 // phai trung TOPIC_PREFIX trong ESP32
+const ZONES = [
+  {id: 1, name: 'Vùng 1'},
+  {id: 2, name: 'Vùng 2'}
+];
+const OFFLINE_MS = 8000;
+
+const HA = 60 * Math.PI / 180;
+let range = 100;
+let gatewayOnline = null;
+const Z = {};   // trang thai tung vung
+
+ZONES.forEach(z => Z[z.id] = {name: z.name, got: false, recvAt: 0, age: 0, fl: 0, t: [], pk: 0, lost: 0, prevN: 0});
+
+// ---------- Dung giao dien ----------
+const root = document.getElementById('zones');
+ZONES.forEach(z => {
+  const d = document.createElement('div');
+  d.className = 'zone';
+  d.innerHTML = `<div class="zh"><b>${z.name}</b><span class="badge" id="b${z.id}"></span></div>
+    <div class="radar"><canvas id="c${z.id}"></canvas></div>
+    <div class="list" id="l${z.id}"></div>
+    <div class="meta" id="m${z.id}"></div>`;
+  root.appendChild(d);
+});
+
+document.getElementById('range').onchange = e => { range = +e.target.value; render(); };
+
+// ---------- MQTT ----------
+const mqBadge = document.getElementById('mq');
+const gwBadge = document.getElementById('gw');
+
+function setBadge(el, text, cls) { el.textContent = text; el.className = 'badge ' + cls; }
+
+const client = mqtt.connect(BROKER_URL, {
+  clientId: 'web_' + Math.random().toString(16).slice(2, 10),
+  reconnectPeriod: 3000,
+  connectTimeout: 10000,
+  clean: true
+});
+
+client.on('connect', () => {
+  setBadge(mqBadge, 'MQTT: đã kết nối', 'ok');
+  client.subscribe(PREFIX + '/zone/+');
+  client.subscribe(PREFIX + '/gateway');
+});
+client.on('reconnect', () => setBadge(mqBadge, 'MQTT: đang kết nối lại...', 'warn'));
+client.on('close',     () => setBadge(mqBadge, 'MQTT: mất kết nối', 'off'));
+client.on('error',     () => setBadge(mqBadge, 'MQTT: lỗi', 'off'));
+
+client.on('message', (topic, payload) => {
+  const msg = payload.toString();
+
+  if (topic === PREFIX + '/gateway') {
+    gatewayOnline = (msg === 'online');
+    return;
+  }
+
+  const m = topic.match(/\/zone\/(\d+)$/);
+  if (!m || !Z[m[1]]) return;
+  let j;
+  try { j = JSON.parse(msg); } catch (e) { return; }
+
+  const z = Z[m[1]];
+  z.got = true;
+  z.age = j.age || 0;
+  z.recvAt = Date.now() - z.age;
+  z.fl = j.fl;
+  z.pk = j.pk;
+  z.lost = j.lost;
+  z.t = (j.t || []).map(t => ({a: t.a, d: t.d, dir: t.r, v: t.v}));
+
+  logEvent(m[1], z);
+  render();
+});
+
+// ---------- Nhat ky ----------
+function logEvent(id, z) {
+  const n = z.t.length;
+  if (n === z.prevN) return;
+  const box = document.getElementById('log');
+  if (box.firstChild && box.firstChild.dataset && box.firstChild.dataset.empty) box.innerHTML = '';
+  const time = new Date().toLocaleTimeString('vi-VN');
+  const div = document.createElement('div');
+  if (n > 0) {
+    const t = z.t[0];
+    div.innerHTML = `${time} · <b>${z.name}</b>: ${n} mục tiêu, #1 ${t.dir ? 'lại gần' : 'ra xa'} ${t.d} m, ${t.v} km/h`;
+  } else {
+    div.innerHTML = `${time} · <b>${z.name}</b>: không còn mục tiêu`;
+  }
+  box.insertBefore(div, box.firstChild);
+  while (box.children.length > 30) box.removeChild(box.lastChild);
+  z.prevN = n;
+}
+
+// ---------- Trang thai ----------
+function zoneState(z) {
+  if (!z.got) return {txt: 'Chưa có dữ liệu', cls: '', online: false};
+  if (Date.now() - z.recvAt > OFFLINE_MS) return {txt: 'Mất liên lạc', cls: 'off', online: false};
+  if (!(z.fl & 1)) return {txt: 'Radar không gửi dữ liệu', cls: 'warn', online: false};
+  return {txt: 'Online', cls: 'ok', online: true};
+}
+
+// ---------- Ve radar ----------
+function draw(id) {
+  const cv = document.getElementById('c' + id);
+  const z = Z[id];
+  const w = cv.parentElement.clientWidth;
+  const h = Math.round(w * 0.68);
+  const dpr = window.devicePixelRatio || 1;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+    cv.style.height = h + 'px';
+    cv.width = Math.round(w * dpr);
+    cv.height = Math.round(h * dpr);
+  }
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const W = w, H = h;
+  ctx.clearRect(0, 0, W, H);
+  const ox = W / 2, oy = H - 8;
+  const R = Math.min(H - 22, (W / 2 - 6) / Math.sin(HA));
+  const st = zoneState(z);
+
+  const grd = ctx.createRadialGradient(ox, oy, 0, ox, oy, R);
+  grd.addColorStop(0, st.online ? '#1d4b6e' : '#2a2f36');
+  grd.addColorStop(1, st.online ? '#2f7da8' : '#3a4048');
+  ctx.beginPath();
+  ctx.moveTo(ox, oy);
+  ctx.arc(ox, oy, R, -Math.PI / 2 - HA, -Math.PI / 2 + HA);
+  ctx.closePath();
+  ctx.fillStyle = grd;
+  ctx.fill();
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.28)';
+  ctx.fillStyle = 'rgba(255,255,255,0.75)';
+  ctx.font = '11px system-ui';
+  ctx.textAlign = 'left';
+  ctx.lineWidth = 1;
+  for (let k = 1; k <= 5; k++) {
+    const r = R * k / 5;
+    ctx.beginPath();
+    ctx.arc(ox, oy, r, -Math.PI / 2 - HA, -Math.PI / 2 + HA);
+    ctx.stroke();
+    ctx.fillText((range * k / 5) + 'm', ox + 4, oy - r + 12);
+  }
+  for (let a = -60; a <= 60; a += 15) {
+    const rad = a * Math.PI / 180;
+    ctx.beginPath();
+    ctx.moveTo(ox, oy);
+    ctx.lineTo(ox + R * Math.sin(rad), oy - R * Math.cos(rad));
+    ctx.stroke();
+  }
+
+  if (!st.online) return;
+  z.t.forEach((t, k) => {
+    const d = Math.min(t.d, range);
+    const rad = Math.max(-60, Math.min(60, t.a)) * Math.PI / 180;
+    const x = ox + (d / range) * R * Math.sin(rad);
+    const y = oy - (d / range) * R * Math.cos(rad);
+    ctx.beginPath();
+    ctx.arc(x, y, 11, 0, Math.PI * 2);
+    ctx.fillStyle = t.dir ? '#ff5d5d' : '#4cd964';
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#fff';
+    ctx.stroke();
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 12px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText(k + 1, x, y + 4);
+  });
+}
+
+function render() {
+  // Gateway
+  if (gatewayOnline === null) setBadge(gwBadge, 'Gateway: ?', '');
+  else if (gatewayOnline)     setBadge(gwBadge, 'Gateway: online', 'ok');
+  else                        setBadge(gwBadge, 'Gateway: offline', 'off');
+
+  ZONES.forEach(zz => {
+    const id = zz.id, z = Z[id];
+    const st = zoneState(z);
+    const b = document.getElementById('b' + id);
+    b.textContent = st.txt;
+    b.className = 'badge ' + st.cls;
+
+    let html = '';
+    if (st.online && z.t.length) {
+      z.t.forEach((t, k) => {
+        html += `<div class="t"><i class="dot" style="background:${t.dir ? 'var(--near)' : 'var(--far)'}"></i>
+          #${k + 1} ${t.dir ? 'Lại gần' : 'Ra xa'} · ${t.d} m · ${t.v} km/h · ${t.a}°</div>`;
+      });
+    } else {
+      html = '<div class="none">' + (st.online ? 'Chưa có phương tiện' : '--') + '</div>';
+    }
+    document.getElementById('l' + id).innerHTML = html;
+    document.getElementById('m' + id).textContent = z.got
+      ? `Gói nhận: ${z.pk} · Mất gói: ${z.lost} · Cập nhật ${((Date.now() - z.recvAt) / 1000).toFixed(1)}s trước`
+      : '';
+    draw(id);
+  });
+}
+
+setInterval(render, 300);
+window.addEventListener('resize', render);
+document.getElementById('log').firstChild.dataset.empty = '1';
+render();
+</script>
+</body>
+</html>
