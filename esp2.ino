@@ -1,9 +1,9 @@
-// ===== ESP2 - TRAM B: HLK-LD2451 + LoRa E32 + man hinh LED P5 HUB75 =====
+// ===== ESP2 - TRAM A: HLK-LD2451 + LoRa E32 + man hinh LED P5 HUB75 =====
 #include <Arduino.h>
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
 #include <ESP32-VirtualMatrixPanel-I2S-DMA.h>
 
-#define NODE_ID 'B'
+#define NODE_ID 'A'
 
 // ---------- Man hinh HUB75 (pinout theo man hinh cua ban) ----------
 #define PANEL_RES_X 64
@@ -395,7 +395,7 @@ void setup() {
   randomSeed(esp_random());
   seqNo = random(0, 200);
 
-  Serial.println("ESP2 - Tram B san sang");
+  Serial.println("ESP2 - Tram A san sang");
   sendHeartbeat();
 }
 
