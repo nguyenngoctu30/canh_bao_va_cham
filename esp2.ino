@@ -1,11 +1,13 @@
-// ===== ESP2 - TRAM A: HLK-LD2451 + LoRa E32 + man hinh LED P5 HUB75 =====
+// ===== TRAM RADAR: HLK-LD2451 + LoRa E32 + man hinh LED P5 HUB75 =====
+// Dung chung cho tram A va tram B: chi doi NODE_ID roi nap.
 #include <Arduino.h>
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
 #include <ESP32-VirtualMatrixPanel-I2S-DMA.h>
 
-#define NODE_ID 'A'
+#define NODE_ID 'B'     // <<< 'A' cho board 1, 'B' cho board 2
+#define NET_ID  "KC"    // ma mang LoRa: giong het ESP3 va tram con lai, nen dat rieng
 
-// ---------- Man hinh HUB75 (pinout theo man hinh cua ban) ----------
+// ---------- Man hinh HUB75 ----------
 #define PANEL_RES_X 64
 #define PANEL_RES_Y 32
 #define NUM_ROWS 1
@@ -32,26 +34,22 @@ VirtualMatrixPanel  *matrix = nullptr;
 uint16_t COL_BLACK, COL_RED, COL_YELLOW, COL_GREEN, COL_GREY, COL_WHITE;
 
 // Canh bao nhan tu ESP3
-const int FAST_KMH = 30;                         // >= muc nay: "di nhanh" (mau do)
-const unsigned long LINK_TIMEOUT_MS = 20000;     // lau khong nhan lenh tu ESP3 -> bao mat song
-const unsigned long WARN_TIMEOUT_MS = 6000;      // lau khong nhan lenh canh bao -> tat canh bao
+const int FAST_KMH = 30;                      // >= muc nay: "di nhanh" (do)
+const unsigned long LINK_TIMEOUT_MS = 20000;  // lau khong nhan lenh ESP3 -> bao mat song
+const unsigned long WARN_TIMEOUT_MS = 6000;   // lau khong nhan lenh canh bao -> tat
 bool warnOn = false;
 int  warnSpeed = 0;
-unsigned long lastW = 0;
+unsigned long lastW = 0, lastFrame = 0;
 int scrollX = PANEL_RES_X;
-unsigned long lastFrame = 0;
 
 // ---------- LoRa E32 ----------
-// Cac chan cu (25/26/27) bi man hinh chiem -> doi sang chan con trong.
-// GPIO34/35 chi la input: dung tot cho AUX va RX (ESP32 chi nhan du lieu).
-const int LORA_AUX = 34;   // ESP32 <- E32 AUX (input only)
+const int LORA_AUX = 34;   // input only
 const int LORA_RX  = 35;   // ESP32 RX <- E32 TX (input only)
 const int LORA_TX  = 18;   // ESP32 TX -> E32 RX
 const int LORA_M1  = 33;
 const int LORA_M0  = 32;
 
 // ---------- Radar LD2451 ----------
-// GPIO16 bi CLK cua man hinh chiem -> RX radar doi sang GPIO22
 const int RADAR_RX = 22;   // ESP32 RX <- HLK TX
 const int RADAR_TX = 17;   // ESP32 TX -> HLK RX
 
@@ -63,7 +61,7 @@ const unsigned long HOLD_MS      = 2000;
 const unsigned long HB_ACTIVE_MS = 1000;
 const unsigned long HB_IDLE_MS   = 5000;
 
-// Thong so truyen tin cay
+// Truyen tin cay
 const unsigned long ACK_TIMEOUT_MS = 1200;
 const int MAX_RETRY = 8;
 const int QSIZE = 8;
@@ -71,18 +69,16 @@ const int QSIZE = 8;
 // Trang thai xe
 bool present = false;
 int  curSpeed = 0, curDist = 0, peakSpeed = 0, hits = 0;
-unsigned long lastSeen = 0, lastHb = 0;
-unsigned long totalCount = 0;
+unsigned long lastSeen = 0, lastHb = 0, totalCount = 0;
 
 // Hang doi ban tin can ACK
 struct Msg { char text[56]; uint8_t seq; };
 Msg q[QSIZE];
-int qHead = 0, qCount = 0;
-int tries = 0;
+int qHead = 0, qCount = 0, tries = 0;
 unsigned long lastSend = 0, retryDelay = ACK_TIMEOUT_MS;
 uint8_t seqNo;
 
-// Bo phan tich khung radar
+// Khung radar
 const uint8_t HDR[4] = {0xF4, 0xF3, 0xF2, 0xF1};
 uint8_t buf[96];
 uint8_t idx = 0;
@@ -121,8 +117,7 @@ void initDisplay() {
 }
 
 void drawCentered(const char* s, int y, int size, uint16_t col) {
-  int w = strlen(s) * 6 * size;
-  int x = (PANEL_RES_X - w) / 2;
+  int x = (PANEL_RES_X - (int)strlen(s) * 6 * size) / 2;
   if (x < 0) x = 0;
   matrix->setTextSize(size);
   matrix->setTextColor(col);
@@ -136,6 +131,8 @@ void drawScreen() {
 
   bool link = (lastW != 0) && (now - lastW < LINK_TIMEOUT_MS);
   bool warn = link && warnOn && (now - lastW < WARN_TIMEOUT_MS);
+  char label[12];
+  snprintf(label, sizeof(label), "TRAM %c", NODE_ID);
 
   if (warn) {
     bool fast = warnSpeed >= FAST_KMH;
@@ -146,8 +143,7 @@ void drawScreen() {
     char sp[8];
     snprintf(sp, sizeof(sp), "%d", warnSpeed);
     int wDigits = strlen(sp) * 12;
-    int total = wDigits + 2 + 24;
-    int x0 = (PANEL_RES_X - total) / 2;
+    int x0 = (PANEL_RES_X - (wDigits + 2 + 24)) / 2;
     if (x0 < 0) x0 = 0;
     matrix->setTextSize(2);
     matrix->setTextColor(col);
@@ -160,7 +156,6 @@ void drawScreen() {
     const char* msg = fast ? "HUONG DOI DIEN CO XE DI NHANH   "
                            : "HUONG DOI DIEN CO XE DANG DEN   ";
     int msgW = strlen(msg) * 6;
-    matrix->setTextSize(1);
     matrix->setTextColor(COL_WHITE);
     matrix->setCursor(scrollX, 24);
     matrix->print(msg);
@@ -170,19 +165,18 @@ void drawScreen() {
   } else if (link) {
     scrollX = PANEL_RES_X;
     drawCentered("AN TOAN", 6, 1, COL_GREEN);
-    char label[12];
-    snprintf(label, sizeof(label), "TRAM %c", NODE_ID);
     drawCentered(label, 18, 1, COL_GREY);
 
   } else {
     scrollX = PANEL_RES_X;
-    drawCentered("MAT SONG", 6, 1, COL_GREY);
-    drawCentered("VOI ESP3", 18, 1, COL_GREY);
+    drawCentered("MAT SONG", 2, 1, COL_GREY);
+    drawCentered("VOI ESP3", 12, 1, COL_GREY);
+    drawCentered(label, 22, 1, COL_GREY);
   }
 }
 
 void displayTick() {
-  if (millis() - lastFrame < 40) return;
+  if (millis() - lastFrame < 40) return;   // ~25 khung/giay
   lastFrame = millis();
   drawScreen();
   dma_display->flipDMABuffer();
@@ -191,6 +185,7 @@ void displayTick() {
 // =====================================================
 //                       LORA
 // =====================================================
+// Khung: $<NET>:<noi dung>*<CS>\n   (CS = XOR phan giua $ va *)
 uint8_t crcOf(const char* s, int len) {
   uint8_t c = 0;
   for (int i = 0; i < len; i++) c ^= (uint8_t)s[i];
@@ -204,10 +199,12 @@ void waitAux() {
 }
 
 void sendFrame(const char* payload) {
-  delay(random(5, 60));
+  delay(random(5, 60));          // giam dung do voi tram con lai
   waitAux();
-  char out[80];
-  int n = snprintf(out, sizeof(out), "$%s*%02X\n", payload, crcOf(payload, strlen(payload)));
+  char body[72];
+  snprintf(body, sizeof(body), "%s:%s", NET_ID, payload);
+  char out[96];
+  int n = snprintf(out, sizeof(out), "$%s*%02X\n", body, crcOf(body, strlen(body)));
   Serial1.write((const uint8_t*)out, n);
   Serial.print("TX: ");
   Serial.print(out);
@@ -275,6 +272,7 @@ void queueVehicle() {
   enqueue(p, s);
 }
 
+// ---------- Radar ----------
 void parseTargets(const uint8_t* d, int len) {
   int bestSpeed = -1, bestDist = 0;
   if (len >= 2) {
@@ -285,8 +283,9 @@ void parseTargets(const uint8_t* d, int len) {
         int dist = t[1];
         int dir  = t[2];     // 1 = lai gan, 0 = ra xa
         int spd  = t[3];     // km/h
-        if (dir == 1 && spd >= MIN_SPEED_KMH && dist <= MAX_DIST_M) {
-          if (spd > bestSpeed) { bestSpeed = spd; bestDist = dist; }
+        if (dir == 1 && spd >= MIN_SPEED_KMH && dist <= MAX_DIST_M && spd > bestSpeed) {
+          bestSpeed = spd;
+          bestDist = dist;
         }
       }
     }
@@ -296,20 +295,15 @@ void parseTargets(const uint8_t* d, int len) {
     if (!present) hits = 0;
     return;
   }
+  if (!present && ++hits < CONFIRM_HITS) return;
 
-  if (!present) {
-    hits++;
-    if (hits < CONFIRM_HITS) return;
-  }
-
-  unsigned long now = millis();
   bool newPass = !present;
   if (newPass) {
     present = true;
     totalCount++;
     peakSpeed = 0;
   }
-  lastSeen = now;
+  lastSeen = millis();
   curSpeed = bestSpeed;
   curDist = bestDist;
   if (bestSpeed > peakSpeed) peakSpeed = bestSpeed;
@@ -337,6 +331,7 @@ void feed(uint8_t b) {
   if (idx >= sizeof(buf)) idx = 0;
 }
 
+// ---------- Nhan tu ESP3 (ACK + lenh hien thi) ----------
 void handleRx(char* line) {
   if (line[0] != '$') return;
   char* star = strrchr(line, '*');
@@ -344,9 +339,13 @@ void handleRx(char* line) {
   int len = star - (line + 1);
   unsigned int cs = 0;
   if (sscanf(star + 1, "%2x", &cs) != 1) return;
-  if (crcOf(line + 1, len) != (uint8_t)cs) return;
+  if (crcOf(line + 1, len) != (uint8_t)cs) return;   // sai checksum -> bo
   *star = 0;
   char* p = line + 1;
+
+  size_t nl = strlen(NET_ID);
+  if (strncmp(p, NET_ID, nl) != 0 || p[nl] != ':') return;   // khac mang -> bo
+  p += nl + 1;
 
   char node; unsigned int s;
   if (sscanf(p, "K,%c,%u", &node, &s) == 2) {
@@ -356,6 +355,7 @@ void handleRx(char* line) {
 
   int sa, sb, spA, spB;
   if (sscanf(p, "W,%d,%d,%d,%d", &sa, &sb, &spA, &spB) == 4) {
+    // Tram A canh bao khi co xe tu B (signA), toc do la cua xe o B; tram B nguoc lai
     warnOn    = (NODE_ID == 'A') ? (sa == 1) : (sb == 1);
     warnSpeed = (NODE_ID == 'A') ? spB : spA;
     lastW = millis();
@@ -378,6 +378,7 @@ void readLora() {
   }
 }
 
+// =====================================================
 void setup() {
   Serial.begin(115200);
   pinMode(LORA_M0, OUTPUT);
@@ -395,7 +396,7 @@ void setup() {
   randomSeed(esp_random());
   seqNo = random(0, 200);
 
-  Serial.println("ESP2 - Tram A san sang");
+  Serial.printf("TRAM %c san sang (mang %s)\n", NODE_ID, NET_ID);
   sendHeartbeat();
 }
 
@@ -405,6 +406,7 @@ void loop() {
 
   unsigned long now = millis();
 
+  // Xe da roi vung giam sat
   if (present && now - lastSeen >= HOLD_MS) {
     present = false;
     hits = 0;
