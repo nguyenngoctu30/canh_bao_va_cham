@@ -3,29 +3,29 @@
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
 #include <ESP32-VirtualMatrixPanel-I2S-DMA.h>
 
-#define NODE_ID 'A'
+#define NODE_ID 'B'
 
-// ---------- Man hinh HUB75 ----------
+// ---------- Man hinh HUB75 (pinout theo man hinh cua ban) ----------
 #define PANEL_RES_X 64
 #define PANEL_RES_Y 32
 #define NUM_ROWS 1
 #define NUM_COLS 1
 #define PANEL_CHAIN (NUM_ROWS * NUM_COLS)
 
-#define R1_PIN  13
-#define G1_PIN  14
-#define B1_PIN  21
-#define R2_PIN  22
-#define G2_PIN  18
-#define B2_PIN  19
+#define R1_PIN  25
+#define G1_PIN  26
+#define B1_PIN  27
+#define R2_PIN  14
+#define G2_PIN  12
+#define B2_PIN  13
 #define A_PIN   23
-#define B_PIN   5
-#define C_PIN   4
+#define B_PIN   19
+#define C_PIN   5
 #define D_PIN   -1
 #define E_PIN   -1
-#define LAT_PIN 2
+#define LAT_PIN 4
 #define OE_PIN  15
-#define CLK_PIN 12
+#define CLK_PIN 16
 
 MatrixPanel_I2S_DMA *dma_display = nullptr;
 VirtualMatrixPanel  *matrix = nullptr;
@@ -42,14 +42,17 @@ int scrollX = PANEL_RES_X;
 unsigned long lastFrame = 0;
 
 // ---------- LoRa E32 ----------
-const int LORA_AUX = 27;
-const int LORA_RX  = 26;   // ESP32 RX <- E32 TX
-const int LORA_TX  = 25;   // ESP32 TX -> E32 RX
+// Cac chan cu (25/26/27) bi man hinh chiem -> doi sang chan con trong.
+// GPIO34/35 chi la input: dung tot cho AUX va RX (ESP32 chi nhan du lieu).
+const int LORA_AUX = 34;   // ESP32 <- E32 AUX (input only)
+const int LORA_RX  = 35;   // ESP32 RX <- E32 TX (input only)
+const int LORA_TX  = 18;   // ESP32 TX -> E32 RX
 const int LORA_M1  = 33;
 const int LORA_M0  = 32;
 
 // ---------- Radar LD2451 ----------
-const int RADAR_RX = 16;   // ESP32 RX <- HLK TX
+// GPIO16 bi CLK cua man hinh chiem -> RX radar doi sang GPIO22
+const int RADAR_RX = 22;   // ESP32 RX <- HLK TX
 const int RADAR_TX = 17;   // ESP32 TX -> HLK RX
 
 // Thong so phat hien
